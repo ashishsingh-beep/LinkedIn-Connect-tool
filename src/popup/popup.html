@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LinkedIn People Scraper</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <h2>LinkedIn Connection Automation</h2>
+  
+  <!-- Search Section -->
+  <div class="search-section">
+    <div class="quick-search-row">
+      <label for="liQuickSearch" class="sr-only">People Search</label>
+      <input id="liQuickSearch" type="text" placeholder="Search people (e.g., 'React Developer')..." maxlength="120" />
+      <button id="liQuickSearchBtn" disabled>Search</button>
+    </div>
+    
+    <div class="quick-search-row" style="margin-top: 8px;">
+      <label for="liUrlSearch" class="sr-only">Search by URL</label>
+      <input id="liUrlSearch" type="text" placeholder="Or paste LinkedIn search URL..." />
+      <button id="liUrlSearchBtn" disabled>Go to URL</button>
+    </div>
+  </div>
+
+  <hr style="margin: 12px 0; border: none; border-top: 1px solid #ddd;">
+
+  <!-- Scraping Settings -->
+  <label for="peopleLimit">Number of people to scrape:</label>
+  <input type="number" id="peopleLimit" value="10" min="1" max="100">
+
+  <div style="display:flex;flex-direction:column;gap:4px;margin:4px 0 10px 0;font-size:12px;">
+    <label style="display:flex;align-items:center;gap:6px;">
+      <input type="radio" name="mode" value="static" checked> Static (current page)
+    </label>
+    <label style="display:flex;align-items:center;gap:6px;">
+      <input type="radio" name="mode" value="paginate"> Auto paginate (Next button)
+    </label>
+  </div>
+
+  <div id="progressWrapper">
+    <div id="progressBar"><span id="progressFill"></span></div>
+    <div id="progressText"></div>
+  </div>
+
+  <div style="display:flex;gap:6px;">
+    <button id="scrapeBtn" style="flex:1;">Scrape People</button>
+    <button id="stopBtn" style="flex:1;background:#b30000;">Stop</button>
+  </div>
+
+  <hr style="margin: 12px 0; border: none; border-top: 1px solid #ddd;">
+
+  <!-- Connection Request Section -->
+  <div class="connection-section">
+    <h3 style="font-size: 14px; margin: 8px 0;">📧 Connection Requests</h3>
+    
+    <div id="peopleCount" style="font-size: 13px; margin-bottom: 8px; color: #666;">
+      People found: <strong id="peopleCountNumber">0</strong>
+    </div>
+
+    <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;cursor:pointer;">
+      <input type="checkbox" id="addNoteToggle">
+      <span>Add personalized note</span>
+    </label>
+
+    <div id="noteTemplateWrapper" style="display:none;margin-bottom:10px;">
+      <label for="noteTemplate" style="font-size:12px;display:block;margin-bottom:4px;">
+        Message template (use {first_name} for personalization):
+      </label>
+      <textarea 
+        id="noteTemplate" 
+        rows="4" 
+        style="width:100%;padding:6px;font-size:12px;resize:vertical;"
+        placeholder="Hi {first_name}, I saw your profile and would love to connect!"
+      >Hi {first_name}, I saw your profile and would love to connect!</textarea>
+      <div style="font-size:11px;color:#666;margin-top:4px;">
+        Example: "Hi Altaf, I saw your profile..." (for Dr. Altaf Khan)
+      </div>
+    </div>
+
+    <div style="display:flex;gap:6px;margin-bottom:10px;">
+      <button id="sendConnectionsBtn" style="flex:1;background:#0a66c2;" disabled>
+        📤 Send Connection Requests
+      </button>
+      <button id="cancelConnectionsBtn" style="flex:1;background:#b30000;" disabled>
+        Cancel
+      </button>
+    </div>
+
+    <div id="connectionProgress" style="display:none;margin-bottom:10px;">
+      <div style="background:#e0e0e0;height:20px;border-radius:4px;overflow:hidden;">
+        <div id="connectionProgressFill" style="background:#0a66c2;height:100%;width:0%;transition:width 0.3s;"></div>
+      </div>
+      <div id="connectionProgressText" style="font-size:12px;margin-top:4px;"></div>
+    </div>
+
+    <div id="connectButtonsInfo" style="font-size:11px;color:#666;margin-bottom:8px;">
+      Click "Scrape People" first to find connections
+    </div>
+  </div>
+
+  <hr style="margin: 12px 0; border: none; border-top: 1px solid #ddd;">
+
+  <button id="downloadJSONBtn">Download JSON</button>
+  <button id="downloadCSVBtn">Download CSV</button>
+
+  <div id="people"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
