@@ -1,15 +1,10 @@
 // PEOPLE MODE POPUP
-const scrapeBtn = document.getElementById('scrapeBtn');
 const downloadJSONBtn = document.getElementById('downloadJSONBtn');
 const downloadCSVBtn = document.getElementById('downloadCSVBtn');
 const peopleDiv = document.getElementById('people');
-const peopleLimitInput = document.getElementById('peopleLimit');
-const modeRadios = Array.from(document.querySelectorAll('input[name="mode"]'));
-const stopBtn = document.getElementById('stopBtn');
-const progressFill = document.getElementById('progressFill');
-const progressText = document.getElementById('progressText');
 
 // Connection request elements
+const connectionLimit = document.getElementById('connectionLimit');
 const addNoteToggle = document.getElementById('addNoteToggle');
 const noteTemplateWrapper = document.getElementById('noteTemplateWrapper');
 const noteTemplate = document.getElementById('noteTemplate');
@@ -25,7 +20,6 @@ if (!sendConnectionsBtn) {
   console.error('❌ sendConnectionsBtn element not found in DOM!');
 }
 
-let scrapingActive = false;
 let connectionSendingActive = false;
 let scrapedPeople = [];
 
@@ -95,7 +89,6 @@ function setStatus(msg, type='info') {
   peopleDiv.innerHTML = `<div class="status status-${type}">${msg}</div>`;
 }
 function enableDownloadButtons(on){ downloadJSONBtn.disabled = !on; downloadCSVBtn.disabled = !on; }
-function setScrapingState(active){ scrapingActive = active; scrapeBtn.disabled = active; stopBtn.disabled = !active; }
 
 // Robust messaging with timeout
 function sendMessageSafely(tabId, message, cb, timeoutMs=10000){
@@ -109,19 +102,7 @@ function sendMessageSafely(tabId, message, cb, timeoutMs=10000){
 
 // Listen for real-time events
 chrome.runtime.onMessage.addListener(msg => {
-  if(msg.action==='scrape_progress'){
-    const pct = msg.limit? Math.min(100, Math.round((msg.count/msg.limit)*100)) : 0;
-    progressFill.style.width = pct + '%';
-    progressText.textContent = `Progress: ${msg.count}/${msg.limit} (${pct}%) Iter:${msg.iterations}`;
-  } else if(msg.action==='scrape_cancelled'){
-    progressText.textContent += ' (Cancelled)';
-  } else if(msg.action==='real_time_person_data') {
-    // Could live preview; keeping console for now
-    console.debug('Person realtime:', msg.data);
-  } else if(msg.action==='real_time_new_person') {
-    // light indication
-    progressText.textContent = `Found: ${msg.newCount} (iterating...)`;
-  } else if(msg.action==='connection_progress'){
+  if(msg.action==='connection_progress'){
     // Update connection progress
     const { sent, failed, total, current, currentName, currentPage, status } = msg.data;
     
@@ -149,76 +130,6 @@ chrome.runtime.onMessage.addListener(msg => {
 });
 
 enableDownloadButtons(false);
-
-scrapeBtn.addEventListener('click', () => {
-  if(scrapingActive) return;
-  const limit = parseInt(peopleLimitInput.value)||10;
-  setStatus(`Scraping up to ${limit} people...`, 'loading');
-  enableDownloadButtons(false);
-  setScrapingState(true);
-  chrome.tabs.query({active:true,currentWindow:true}, tabs => {
-    if(!tabs||!tabs.length){ setStatus('No active tab.', 'error'); setScrapingState(false); return; }
-    const tabId = tabs[0].id;
-    function tryInject(){
-      return new Promise(resolve=>{
-        if(!chrome.scripting) return resolve();
-        chrome.scripting.executeScript({target:{tabId}, files:['src/content/scraper.js']}, ()=>resolve());
-      });
-    }
-    function ping(attempt=1){
-      sendMessageSafely(tabId,{action:'ping_scraper'}, (resp,err)=>{
-        if(err || !resp || !resp.ok){
-          if(attempt===1){
-            tryInject().then(()=> setTimeout(()=> ping(attempt+1),300));
-            return;
-          }
-          if(attempt>=5){ setStatus(`Failed to initialize content script after ${attempt} attempts. Refresh page and retry.`, 'error'); setScrapingState(false); return; }
-          setStatus(`Retrying... (attempt ${attempt+1})`,'loading');
-          return setTimeout(()=> ping(attempt+1), 400*attempt);
-        }
-        startScrape();
-      });
-    }
-    function startScrape(){
-  let selectedMode = modeRadios.find(r=>r.checked)?.value || 'static';
-  let action = 'scrape_people';
-  if(selectedMode==='paginate') action='auto_scrape_people';
-      progressFill.style.width='0%';
-      progressText.textContent='Starting...';
-      sendMessageSafely(tabId,{action,limit,options:{waitMs:1600}}, (resp,err)=>{
-        if(err){ setStatus(`Error: ${err.message}`,'error'); setScrapingState(false); return; }
-        if(!resp){ setStatus('No response from content script','error'); setScrapingState(false); return; }
-        if(!resp.ok && !resp.cancelled){ setStatus(`Scrape failed: ${resp.error||'Unknown'}`,'error'); setScrapingState(false); return; }
-  // Simplified data structure: only first_name, aria_label, btn_selector
-        const fieldsOrder=['first_name','aria_label','btn_selector'];
-        scrapedPeople = (resp.people||[]).map(p=>{ 
-          const o={};
-          fieldsOrder.forEach(f=> { o[f]= p && (p[f]!==undefined)? p[f]:''; });
-          return o; 
-        });
-        const modeLabel = resp.mode==='auto' ? ' (auto)' : '';
-        if(resp.cancelled) setStatus(`Scrape cancelled${modeLabel}. Collected ${resp.count} people (partial).`,'info');
-        else setStatus(`Scrape complete${modeLabel}. Collected ${resp.count} people.`,'success');
-        peopleDiv.innerHTML += `<pre>${JSON.stringify(scrapedPeople,null,2)}</pre>`;
-        enableDownloadButtons(scrapedPeople.length>0);
-        progressText.textContent += resp.cancelled ? ' Cancelled.' : ' Finished.';
-        
-        // Downloads now only triggered by explicit user clicks (removed autoDownload per new spec)
-        setScrapingState(false);
-      }, action==='auto_scrape_people'?60000:30000);
-    }
-    ping();
-  });
-});
-
-stopBtn.addEventListener('click', ()=>{
-  if(!scrapingActive || stopBtn.disabled) return;
-  stopBtn.disabled = true;
-  chrome.tabs.query({active:true,currentWindow:true}, tabs => {
-    if(!tabs||!tabs.length) return;
-    sendMessageSafely(tabs[0].id,{action:'cancel_scrape'},()=>{ setStatus('Cancellation requested...','loading'); });
-  });
-});
 
 downloadJSONBtn.addEventListener('click', ()=>{
   if(!scrapedPeople.length) return alert('No data yet');
@@ -251,6 +162,7 @@ if (sendConnectionsBtn) {
   
     const addNote = addNoteToggle.checked;
     const template = addNote ? noteTemplate.value.trim() : '';
+    const limit = parseInt(connectionLimit.value) || 50;
   
     if(addNote && !template){
       alert('Please enter a note template or disable "Add personalized note"');
@@ -268,7 +180,7 @@ if (sendConnectionsBtn) {
     cancelConnectionsBtn.disabled = false;
     connectionProgress.style.display = 'block';
     connectionProgressFill.style.width = '0%';
-    connectionProgressText.textContent = '🚀 Starting auto-paginate connection sender...';
+    connectionProgressText.textContent = `🚀 Sending up to ${limit} connection requests...`;
   
     chrome.tabs.query({active:true,currentWindow:true}, tabs => {
       if(!tabs||!tabs.length){ 
@@ -281,14 +193,14 @@ if (sendConnectionsBtn) {
     
       const tabId = tabs[0].id;
     
-      // Use AUTO-SEND mode
+      // Use AUTO-SEND mode with connection limit
       sendMessageSafely(tabId, {
         action: 'auto_send_connection_requests',
         noteTemplate: template,
         addNote: addNote,
         delayMin: 3000,  // 3 seconds minimum
         delayMax: 8000,  // 8 seconds maximum
-        maxPages: 20,    // Process up to 20 pages
+        maxConnections: limit,  // User-specified limit
         peoplePerPage: 10  // 10 people per page
       }, (resp, err) => {
         connectionSendingActive = false;

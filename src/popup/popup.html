@@ -26,37 +26,18 @@
 
   <hr style="margin: 12px 0; border: none; border-top: 1px solid #ddd;">
 
-  <!-- Scraping Settings -->
-  <label for="peopleLimit">Number of people to scrape:</label>
-  <input type="number" id="peopleLimit" value="10" min="1" max="100">
-
-  <div style="display:flex;flex-direction:column;gap:4px;margin:4px 0 10px 0;font-size:12px;">
-    <label style="display:flex;align-items:center;gap:6px;">
-      <input type="radio" name="mode" value="static" checked> Static (current page)
-    </label>
-    <label style="display:flex;align-items:center;gap:6px;">
-      <input type="radio" name="mode" value="paginate"> Auto paginate (Next button)
-    </label>
-  </div>
-
-  <div id="progressWrapper">
-    <div id="progressBar"><span id="progressFill"></span></div>
-    <div id="progressText"></div>
-  </div>
-
-  <div style="display:flex;gap:6px;">
-    <button id="scrapeBtn" style="flex:1;">Scrape People</button>
-    <button id="stopBtn" style="flex:1;background:#b30000;">Stop</button>
-  </div>
-
-  <hr style="margin: 12px 0; border: none; border-top: 1px solid #ddd;">
-
   <!-- Connection Request Section -->
   <div class="connection-section">
     <h3 style="font-size: 14px; margin: 8px 0;">🚀 Auto Connection Sender</h3>
     
     <div style="font-size: 12px; margin-bottom: 8px; color: #0a66c2; background: #e7f3ff; padding: 8px; border-radius: 4px;">
       💡 <strong>Auto Mode:</strong> Scans page → Sends requests → Goes to next page → Repeats
+    </div>
+
+    <label for="connectionLimit" style="font-weight: 600; margin-bottom: 4px; display: block;">Number of connection requests to send:</label>
+    <input type="number" id="connectionLimit" value="50" min="1" max="200" style="width: 100%; padding: 6px; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 4px;">
+    <div style="font-size: 11px; color: #666; margin-bottom: 10px;">
+      Extension will send requests across multiple pages until this limit is reached
     </div>
 
     <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;cursor:pointer;">

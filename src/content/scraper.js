@@ -1,7 +1,4 @@
-// LinkedIn People Scraper (single file) - now aligned to provided simplified XPaths
-// Features: static scrape, auto paginate (Next button), real-time progress, cancellation
-// Output fields: name, profileUrl, jobTitle (bio), location, currentTitle, followers, status
-// Mapping note: user provided 'bio' XPath -> stored in existing 'jobTitle' field to avoid downstream schema changes.
+// Linkedin connect request sender tool.
 
 (function () {
   if (window.__LINKEDIN_PEOPLE_SCRAPER__) {
@@ -455,7 +452,7 @@
       addNote = false,
       delayMin = 3000,
       delayMax = 8000,
-      maxPages = 20,  // Safety limit
+      maxConnections = 50,  // Total connections to send
       peoplePerPage = 10
     } = options;
 
@@ -468,14 +465,14 @@
     let currentPage = 1;
     let totalProcessed = 0;
 
-    console.log(`🚀 Starting AUTO-PAGINATE connection sender (max ${maxPages} pages)`);
+    console.log(`🚀 Starting AUTO-PAGINATE connection sender (max ${maxConnections} connections)`);
     chrome.runtime.sendMessage({ 
       action: 'connection_progress', 
       data: { sent: 0, failed: 0, total: 0, status: 'started' }
     }, () => {});
 
-    // MAIN LOOP: Process each page
-    while (currentPage <= maxPages && !connectionState.cancelled) {
+    // MAIN LOOP: Process each page until we reach maxConnections
+    while (totalProcessed < maxConnections && !connectionState.cancelled) {
       console.log(`\n📄 ===== PAGE ${currentPage} =====`);
       
       // Wait for page to load
@@ -484,7 +481,8 @@
       await sleep(1000);
 
       // STEP 1: Scan current page for people with Invite buttons
-      const peopleOnThisPage = scanPageForConnections(peoplePerPage);
+      const remainingLimit = maxConnections - totalProcessed;
+      const peopleOnThisPage = scanPageForConnections(Math.min(peoplePerPage, remainingLimit));
       
       if (peopleOnThisPage.length === 0) {
         console.log(`⚠️ No people with Invite buttons found on page ${currentPage}`);
@@ -786,7 +784,7 @@
           return true; // async
         }
         case 'auto_send_connection_requests': {
-          const { noteTemplate, addNote, delayMin, delayMax, maxPages, peoplePerPage } = req;
+          const { noteTemplate, addNote, delayMin, delayMax, maxConnections, peoplePerPage } = req;
           (async () => {
             try {
               const result = await autoSendConnectionRequests({ 
@@ -794,7 +792,7 @@
                 addNote, 
                 delayMin: delayMin || 3000, 
                 delayMax: delayMax || 8000,
-                maxPages: maxPages || 20,
+                maxConnections: maxConnections || 50,
                 peoplePerPage: peoplePerPage || 10
               });
               sendResponse({ ok: true, result });
