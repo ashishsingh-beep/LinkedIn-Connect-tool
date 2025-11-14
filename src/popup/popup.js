@@ -18,8 +18,12 @@ const cancelConnectionsBtn = document.getElementById('cancelConnectionsBtn');
 const connectionProgress = document.getElementById('connectionProgress');
 const connectionProgressFill = document.getElementById('connectionProgressFill');
 const connectionProgressText = document.getElementById('connectionProgressText');
-const peopleCountNumber = document.getElementById('peopleCountNumber');
 const connectButtonsInfo = document.getElementById('connectButtonsInfo');
+
+// Verify critical elements exist
+if (!sendConnectionsBtn) {
+  console.error('❌ sendConnectionsBtn element not found in DOM!');
+}
 
 let scrapingActive = false;
 let connectionSendingActive = false;
@@ -119,23 +123,24 @@ chrome.runtime.onMessage.addListener(msg => {
     progressText.textContent = `Found: ${msg.newCount} (iterating...)`;
   } else if(msg.action==='connection_progress'){
     // Update connection progress
-    const { sent, failed, total, current, currentName, status } = msg.data;
+    const { sent, failed, total, current, currentName, currentPage, status } = msg.data;
     
     if(status === 'started'){
       connectionProgress.style.display = 'block';
       connectionProgressFill.style.width = '0%';
-      connectionProgressText.textContent = 'Starting connection requests...';
+      connectionProgressText.textContent = '🚀 Starting auto-paginate connection sender...';
     } else if(status === 'processing'){
       const pct = total > 0 ? Math.round((sent + failed) / total * 100) : 0;
       connectionProgressFill.style.width = pct + '%';
-      connectionProgressText.textContent = `Sent: ${sent} | Failed: ${failed} | Total: ${total} (${pct}%)`;
+      const pageInfo = currentPage ? ` | Page ${currentPage}` : '';
+      connectionProgressText.textContent = `✅ Sent: ${sent} | ❌ Failed: ${failed}${pageInfo}`;
       if(currentName){
         connectionProgressText.textContent += ` | Current: ${currentName}`;
       }
     } else if(status === 'completed'){
       const pct = 100;
       connectionProgressFill.style.width = pct + '%';
-      connectionProgressText.textContent = `✅ Completed! Sent: ${sent} | Failed: ${failed} | Total: ${total}`;
+      connectionProgressText.textContent = `🎉 Completed! Sent: ${sent} | Failed: ${failed}`;
       connectionSendingActive = false;
       sendConnectionsBtn.disabled = false;
       cancelConnectionsBtn.disabled = true;
@@ -198,20 +203,6 @@ scrapeBtn.addEventListener('click', () => {
         enableDownloadButtons(scrapedPeople.length>0);
         progressText.textContent += resp.cancelled ? ' Cancelled.' : ' Finished.';
         
-        // Update people count and enable connection button
-        peopleCountNumber.textContent = scrapedPeople.length;
-        sendConnectionsBtn.disabled = scrapedPeople.length === 0;
-        
-        // Check for Connect buttons
-        if(scrapedPeople.length > 0){
-          sendMessageSafely(tabId, {action: 'find_connect_buttons'}, (btnResp, btnErr) => {
-            if(btnResp && btnResp.ok){
-              connectButtonsInfo.textContent = `Found ${btnResp.count} Connect buttons on this page`;
-              connectButtonsInfo.style.color = btnResp.count > 0 ? '#0a66c2' : '#999';
-            }
-          });
-        }
-        
         // Downloads now only triggered by explicit user clicks (removed autoDownload per new spec)
         setScrapingState(false);
       }, action==='auto_scrape_people'?60000:30000);
@@ -254,83 +245,79 @@ function triggerCSV(data){
 // autoDownload removed per specification (user must click)
 
 // Send Connection Requests Button
-sendConnectionsBtn.addEventListener('click', () => {
-  if(connectionSendingActive) return;
-  if(!scrapedPeople || scrapedPeople.length === 0){
-    alert('Please scrape people first!');
-    return;
-  }
+if (sendConnectionsBtn) {
+  sendConnectionsBtn.addEventListener('click', () => {
+    if(connectionSendingActive) return;
   
-  const addNote = addNoteToggle.checked;
-  const template = addNote ? noteTemplate.value.trim() : '';
+    const addNote = addNoteToggle.checked;
+    const template = addNote ? noteTemplate.value.trim() : '';
   
-  if(addNote && !template){
-    alert('Please enter a note template or disable "Add personalized note"');
-    return;
-  }
-  
-  if(addNote && !template.includes('{first_name}')){
-    const confirm = window.confirm('Your template does not contain {first_name} placeholder. Continue anyway?');
-    if(!confirm) return;
-  }
-  
-  const confirmSend = window.confirm(
-    `Send connection requests to ${scrapedPeople.length} people?\n\n` +
-    (addNote ? `With personalized note:\n"${template.substring(0, 100)}${template.length > 100 ? '...' : ''}"\n\n` : 'Without note\n\n') +
-    'This will take several minutes with delays between each request.'
-  );
-  
-  if(!confirmSend) return;
-  
-  connectionSendingActive = true;
-  sendConnectionsBtn.disabled = true;
-  cancelConnectionsBtn.disabled = false;
-  connectionProgress.style.display = 'block';
-  connectionProgressFill.style.width = '0%';
-  connectionProgressText.textContent = 'Preparing to send connection requests...';
-  
-  chrome.tabs.query({active:true,currentWindow:true}, tabs => {
-    if(!tabs||!tabs.length){ 
-      alert('No active tab found');
-      connectionSendingActive = false;
-      sendConnectionsBtn.disabled = false;
-      cancelConnectionsBtn.disabled = true;
-      return; 
+    if(addNote && !template){
+      alert('Please enter a note template or disable "Add personalized note"');
+      return;
     }
-    
-    const tabId = tabs[0].id;
-    
-    sendMessageSafely(tabId, {
-      action: 'send_connection_requests',
-      people: scrapedPeople,
-      noteTemplate: template,
-      addNote: addNote,
-      delayMin: 3000,  // 3 seconds minimum
-      delayMax: 8000   // 8 seconds maximum
-    }, (resp, err) => {
-      connectionSendingActive = false;
-      sendConnectionsBtn.disabled = false;
-      cancelConnectionsBtn.disabled = true;
-      
-      if(err || !resp || !resp.ok){
-        alert(`Error sending connections: ${err?.message || resp?.error || 'Unknown error'}`);
-        connectionProgressText.textContent = '❌ Error occurred';
-        return;
+  
+    if(addNote && !template.includes('{first_name}')){
+      const confirm = window.confirm('Your template does not contain {first_name} placeholder. Continue anyway?');
+      if(!confirm) return;
+    }
+  
+    // Start AUTO-PAGINATE mode (scans page, sends requests, goes to next page)
+    connectionSendingActive = true;
+    sendConnectionsBtn.disabled = true;
+    cancelConnectionsBtn.disabled = false;
+    connectionProgress.style.display = 'block';
+    connectionProgressFill.style.width = '0%';
+    connectionProgressText.textContent = '🚀 Starting auto-paginate connection sender...';
+  
+    chrome.tabs.query({active:true,currentWindow:true}, tabs => {
+      if(!tabs||!tabs.length){ 
+        alert('No active tab found');
+        connectionSendingActive = false;
+        sendConnectionsBtn.disabled = false;
+        cancelConnectionsBtn.disabled = true;
+        return; 
       }
+    
+      const tabId = tabs[0].id;
+    
+      // Use AUTO-SEND mode
+      sendMessageSafely(tabId, {
+        action: 'auto_send_connection_requests',
+        noteTemplate: template,
+        addNote: addNote,
+        delayMin: 3000,  // 3 seconds minimum
+        delayMax: 8000,  // 8 seconds maximum
+        maxPages: 20,    // Process up to 20 pages
+        peoplePerPage: 10  // 10 people per page
+      }, (resp, err) => {
+        connectionSendingActive = false;
+        sendConnectionsBtn.disabled = false;
+        cancelConnectionsBtn.disabled = true;
       
-      const { sent, failed, total, cancelled } = resp.result;
+        if(err || !resp || !resp.ok){
+          alert(`Error sending connections: ${err?.message || resp?.error || 'Unknown error'}`);
+          connectionProgressText.textContent = '❌ Error occurred';
+          return;
+        }
       
-      if(cancelled){
-        alert(`Connection sending cancelled.\n\nSent: ${sent}\nFailed: ${failed}\nTotal: ${total}`);
-      } else {
-        alert(`Connection requests completed!\n\nSent: ${sent}\nFailed: ${failed}\nTotal: ${total}`);
-      }
-    }, 300000); // 5 minute timeout
+        const { sent, failed, pagesProcessed, cancelled } = resp.result;
+      
+        if(cancelled){
+          alert(`Connection sending cancelled.\n\nSent: ${sent}\nFailed: ${failed}\nPages: ${pagesProcessed || 0}`);
+        } else {
+          alert(`✅ Auto-send completed!\n\nSent: ${sent}\nFailed: ${failed}\nPages processed: ${pagesProcessed || 0}`);
+        }
+      }, 600000); // 10 minute timeout for auto-paginate
+    });
   });
-});
+} else {
+  console.error('❌ sendConnectionsBtn not found, cannot attach event listener!');
+}
 
 // Cancel Connection Requests Button
-cancelConnectionsBtn.addEventListener('click', () => {
+if (cancelConnectionsBtn) {
+  cancelConnectionsBtn.addEventListener('click', () => {
   if(!connectionSendingActive) return;
   
   const confirmCancel = window.confirm('Are you sure you want to cancel sending connection requests?');
@@ -343,7 +330,10 @@ cancelConnectionsBtn.addEventListener('click', () => {
       connectionProgressText.textContent += ' (Cancelling...)';
     });
   });
-});
+  });
+} else {
+  console.error('❌ cancelConnectionsBtn not found, cannot attach event listener!');
+}
 
 // Initial status based on active tab URL
 chrome.tabs.query({active:true,currentWindow:true}, tabs => {

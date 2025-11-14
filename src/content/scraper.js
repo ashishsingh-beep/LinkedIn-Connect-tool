@@ -177,7 +177,10 @@
     const fullName = firstCandidateText(xpaths.name, node);
     const firstName = cleanAndExtractFirstName(fullName);
     
-    if (!firstName) return null;
+    if (!firstName) {
+      if (DEBUG_VERBOSE) console.warn('⚠️ No name found in container');
+      return null;
+    }
     
     // Find Connect button within this container
     const connectBtn = node.querySelector('button[aria-label*="Connect with"]')
@@ -186,9 +189,11 @@
       );
     
     if (!connectBtn) {
-      console.warn(`⚠️ No Connect button found for ${firstName}`);
+      if (DEBUG_VERBOSE) console.warn(`⚠️ No Connect button found for ${firstName} (may be already connected or pending)`);
       return null;
     }
+    
+    console.log(`✅ Found Connect button for ${firstName}`);
     
     const ariaLabel = connectBtn.getAttribute('aria-label') || `Connect with ${firstName}`;
     const btnSelector = `button[aria-label="${ariaLabel}"]`;
@@ -219,11 +224,17 @@
       console.log(`📦 Using container XPath: ${xp} (fallback=${fallback}) count=${nodes.length}`);
     }
     const people = [];
+    let skippedNoButton = 0;
     for (const n of nodes) {
       if (people.length >= limit) break;
       const p = extractPerson(n);
-      if (p) { people.push(p); }
+      if (p) { 
+        people.push(p); 
+      } else {
+        skippedNoButton++;
+      }
     }
+    console.log(`📊 Scrape summary: Found ${people.length} people with Connect buttons, skipped ${skippedNoButton} without Connect button`);
     return people.map(({ internalId, ...rest }) => rest);
   }
 
@@ -347,15 +358,15 @@
   }
 
   /**
-   * Click a Connect button using selector and add note if enabled
-   * @param {string} btnSelector - CSS selector for the Connect button
+   * Click Connect/Invite button and send request directly
+   * @param {string} btnSelector - CSS selector for the button
    * @param {string} note - Personalized note to add
    * @param {boolean} addNote - Whether to add a note
    * @returns {Promise<boolean>} Success status
    */
   async function clickConnectButton(btnSelector, note, addNote) {
     try {
-      // Find and click the Connect button using the stored selector
+      // Find and click the button using the stored selector
       const button = document.querySelector(btnSelector);
       
       if (!button) {
@@ -363,11 +374,15 @@
         return false;
       }
       
+      // Scroll button into view
+      button.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      await sleep(300);
+      
       button.click();
-      console.log('✅ Clicked Connect button:', btnSelector);
+      console.log('✅ Clicked button:', btnSelector);
       
       // Wait for modal to appear
-      await sleep(1500);
+      await sleep(2000);
       
       if (addNote && note) {
         // Try to find "Add a note" button
@@ -376,7 +391,7 @@
         
         if (addNoteBtn) {
           addNoteBtn.click();
-          await sleep(800);
+          await sleep(1000);
           
           // Find the textarea and insert note
           const textarea = document.querySelector('textarea[name="message"]')
@@ -392,33 +407,227 @@
         }
       }
       
-      // Find and click Send button
+      // Find and click Send button (direct send, no confirmation)
       const sendBtn = document.querySelector('button[aria-label*="Send"]')
+        || document.querySelector('button[aria-label*="Send invitation"]')
         || Array.from(document.querySelectorAll('button')).find(b => 
-            b.textContent.trim() === 'Send' || b.textContent.includes('Send invitation')
+            b.textContent.trim() === 'Send' || b.textContent.includes('Send')
           );
       
       if (sendBtn && !sendBtn.disabled) {
         sendBtn.click();
-        console.log('📤 Sent connection request');
-        await sleep(1000);
+        console.log('📤 Sent connection request directly');
+        await sleep(1500);
         return true;
       } else {
         console.warn('⚠️ Send button not found or disabled');
         // Try to close modal
         const closeBtn = document.querySelector('button[aria-label*="Dismiss"]')
-          || document.querySelector('button[data-test-modal-close-btn]');
-        if (closeBtn) closeBtn.click();
+          || document.querySelector('button[data-test-modal-close-btn]')
+          || document.querySelector('button[data-test-modal-id="send-invite-modal"] svg')?.closest('button');
+        if (closeBtn) {
+          closeBtn.click();
+          await sleep(500);
+        }
         return false;
       }
     } catch (error) {
       console.error('❌ Error in clickConnectButton:', error);
+      // Try to close any open modal
+      try {
+        const closeBtn = document.querySelector('button[aria-label*="Dismiss"]')
+          || document.querySelector('button[data-test-modal-close-btn]');
+        if (closeBtn) closeBtn.click();
+      } catch (_) {}
       return false;
     }
   }
 
   /**
-   * Send connection requests to all found people
+   * AUTO-PAGINATE CONNECTION SENDER
+   * Scans current page → Sends all requests → Goes to next page → Repeats
+   * @param {Object} options - Configuration options
+   * @returns {Promise<Object>} Results object
+   */
+  async function autoSendConnectionRequests(options) {
+    const {
+      noteTemplate = "",
+      addNote = false,
+      delayMin = 3000,
+      delayMax = 8000,
+      maxPages = 20,  // Safety limit
+      peoplePerPage = 10
+    } = options;
+
+    connectionState.cancelled = false;
+    connectionState.sent = 0;
+    connectionState.failed = 0;
+    connectionState.total = 0;
+    connectionState.currentIndex = 0;
+
+    let currentPage = 1;
+    let totalProcessed = 0;
+
+    console.log(`🚀 Starting AUTO-PAGINATE connection sender (max ${maxPages} pages)`);
+    chrome.runtime.sendMessage({ 
+      action: 'connection_progress', 
+      data: { sent: 0, failed: 0, total: 0, status: 'started' }
+    }, () => {});
+
+    // MAIN LOOP: Process each page
+    while (currentPage <= maxPages && !connectionState.cancelled) {
+      console.log(`\n📄 ===== PAGE ${currentPage} =====`);
+      
+      // Wait for page to load
+      await sleep(2000);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      await sleep(1000);
+
+      // STEP 1: Scan current page for people with Invite buttons
+      const peopleOnThisPage = scanPageForConnections(peoplePerPage);
+      
+      if (peopleOnThisPage.length === 0) {
+        console.log(`⚠️ No people with Invite buttons found on page ${currentPage}`);
+        break;
+      }
+
+      console.log(`✅ Found ${peopleOnThisPage.length} people to connect on page ${currentPage}`);
+      connectionState.total += peopleOnThisPage.length;
+
+      // STEP 2: Send connection request to each person on this page
+      for (let i = 0; i < peopleOnThisPage.length; i++) {
+        if (connectionState.cancelled) {
+          console.log('🛑 Cancelled by user');
+          break;
+        }
+
+        const person = peopleOnThisPage[i];
+        totalProcessed++;
+
+        console.log(`\n👤 [${totalProcessed}] Processing: ${person.first_name}`);
+
+        // Scroll to button
+        const buttonElement = document.querySelector(person.btn_selector);
+        if (buttonElement) {
+          buttonElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          await sleep(800);
+        }
+
+        // Generate personalized note
+        const personalizedNote = addNote ? generatePersonalizedNote(noteTemplate, person.first_name) : "";
+
+        // Send the connection request
+        const success = await clickConnectButton(person.btn_selector, personalizedNote, addNote);
+
+        if (success) {
+          connectionState.sent++;
+          console.log(`✅ Sent to ${person.first_name} (${connectionState.sent} total)`);
+        } else {
+          connectionState.failed++;
+          console.log(`❌ Failed for ${person.first_name} (${connectionState.failed} total)`);
+        }
+
+        // Send progress update
+        chrome.runtime.sendMessage({ 
+          action: 'connection_progress', 
+          data: { 
+            sent: connectionState.sent, 
+            failed: connectionState.failed, 
+            total: connectionState.total,
+            current: totalProcessed,
+            currentName: person.first_name,
+            currentPage: currentPage,
+            status: 'processing'
+          }
+        }, () => {});
+
+        // Random delay between requests (human-like behavior)
+        if (i < peopleOnThisPage.length - 1) {
+          const delay = Math.floor(Math.random() * (delayMax - delayMin + 1)) + delayMin;
+          console.log(`⏳ Waiting ${(delay/1000).toFixed(1)}s...`);
+          await sleep(delay);
+        }
+      }
+
+      if (connectionState.cancelled) break;
+
+      // STEP 3: Try to go to next page
+      console.log(`\n🔄 Attempting to go to next page...`);
+      const hasNext = clickNext();
+      
+      if (!hasNext) {
+        console.log(`✋ No more pages available. Stopping.`);
+        break;
+      }
+
+      console.log(`✅ Clicked Next button, waiting for page ${currentPage + 1} to load...`);
+      await sleep(3000);  // Wait for next page to load
+      
+      currentPage++;
+    }
+
+    const results = {
+      sent: connectionState.sent,
+      failed: connectionState.failed,
+      total: connectionState.total,
+      pagesProcessed: currentPage,
+      cancelled: connectionState.cancelled
+    };
+
+    console.log('\n🎉 ===== AUTO-SEND COMPLETED =====');
+    console.log(`📊 Results: Sent: ${results.sent} | Failed: ${results.failed} | Pages: ${results.pagesProcessed}`);
+    
+    chrome.runtime.sendMessage({ 
+      action: 'connection_progress', 
+      data: { ...results, status: 'completed' }
+    }, () => {});
+
+    return results;
+  }
+
+  /**
+   * Scan current page for people with Invite buttons
+   * @param {number} limit - Max people to find on this page
+   * @returns {Array} Array of {first_name, aria_label, btn_selector}
+   */
+  function scanPageForConnections(limit = 10) {
+    const peopleToConnect = [];
+    
+    // Find all Invite buttons on current page
+    const inviteButtons = Array.from(document.querySelectorAll('button'))
+      .filter(btn => {
+        const ariaLabel = btn.getAttribute('aria-label') || '';
+        return ariaLabel.includes('Invite') && ariaLabel.includes('to connect');
+      })
+      .slice(0, limit);  // Limit per page
+
+    console.log(`🔍 Found ${inviteButtons.length} Invite buttons on current page`);
+
+    for (const button of inviteButtons) {
+      const ariaLabel = button.getAttribute('aria-label');
+      
+      // Extract first name from "Invite Nakul Sakhuja to connect"
+      const match = ariaLabel.match(/Invite\s+(\S+)/);
+      const firstName = match ? match[1] : '';
+      
+      if (!firstName) continue;
+
+      const btnSelector = `button[aria-label="${ariaLabel}"]`;
+
+      peopleToConnect.push({
+        first_name: firstName,
+        aria_label: ariaLabel,
+        btn_selector: btnSelector
+      });
+
+      console.log(`  ✓ ${firstName}: ${ariaLabel}`);
+    }
+
+    return peopleToConnect;
+  }
+
+  /**
+   * Original function: Send connection requests to specific people list
    * @param {Object} options - Configuration options
    * @returns {Promise<Object>} Results object
    */
@@ -568,6 +777,25 @@
                 addNote, 
                 delayMin: delayMin || 3000, 
                 delayMax: delayMax || 8000 
+              });
+              sendResponse({ ok: true, result });
+            } catch (e) { 
+              sendResponse({ ok: false, error: e.message }); 
+            }
+          })();
+          return true; // async
+        }
+        case 'auto_send_connection_requests': {
+          const { noteTemplate, addNote, delayMin, delayMax, maxPages, peoplePerPage } = req;
+          (async () => {
+            try {
+              const result = await autoSendConnectionRequests({ 
+                noteTemplate, 
+                addNote, 
+                delayMin: delayMin || 3000, 
+                delayMax: delayMax || 8000,
+                maxPages: maxPages || 20,
+                peoplePerPage: peoplePerPage || 10
               });
               sendResponse({ ok: true, result });
             } catch (e) { 
