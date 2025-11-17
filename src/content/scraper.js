@@ -25,6 +25,7 @@
 
   // Exact XPaths for invite modal controls
   const modalXpaths = {
+    connectButton: "//button[contains(@aria-label, 'to connect')]",  // e.g., "Invite Vishal Jindal to connect"
     addNoteButton: "//button[@aria-label='Add a note']",
     messageTextarea: "//textarea[@id='custom-message']",
     sendButton: "//button[@aria-label='Send invitation']"
@@ -417,43 +418,50 @@
   }
 
   /**
-   * Click Invite link and handle modal dialog
-   * @param {string} linkSelector - CSS selector for the invite anchor link
+   * Click Connect button and handle modal dialog
+   * @param {string} buttonXPath - XPath to locate the Connect button (using aria-label pattern)
    * @param {string} note - Personalized note to add (with {first_name} already replaced)
    * @param {boolean} addNote - Whether to add a note
    * @returns {Promise<boolean>} Success status
    */
-  async function clickConnectButton(linkSelector, note, addNote) {
+  async function clickConnectButton(buttonXPath, note, addNote) {
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('🎯 Starting connection request process');
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     
     try {
-      // STEP 1: Find and click the invite link
-      console.log('📍 STEP 1: Locating invite link...');
-      console.log('   Selector:', linkSelector);
+      // STEP 1: Find and click the Connect button
+      console.log('📍 STEP 1: Locating Connect button...');
+      console.log('   XPath:', buttonXPath);
       
-      const inviteLink = document.querySelector(linkSelector);
+      const connectBtn = document.evaluate(
+        buttonXPath,
+        document,
+        null,
+        XPathResult.FIRST_ORDERED_NODE_TYPE,
+        null
+      ).singleNodeValue;
       
-      if (!inviteLink) {
-        console.error('❌ FAILED: Invite link not found');
-        console.error('   Selector:', linkSelector);
+      if (!connectBtn) {
+        console.error('❌ FAILED: Connect button not found');
+        console.error('   XPath:', buttonXPath);
         return false;
       }
       
-      console.log('✅ Invite link found');
-      console.log('   href:', inviteLink.getAttribute('href'));
-      console.log('   aria-label:', inviteLink.getAttribute('aria-label'));
+      console.log('✅ Connect button found');
+      console.log('   aria-label:', connectBtn.getAttribute('aria-label'));
+      console.log('   Button text:', connectBtn.textContent.trim());
+      console.log('   Class:', connectBtn.className);
       
-      // Scroll link into view with delay
-      console.log('📜 Scrolling link into view...');
-      inviteLink.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      // Scroll button into view with delay
+      console.log('📜 Scrolling button into view...');
+      connectBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
       await sleep(800); // Increased delay for smooth scrolling
       
-      // Click the invite link
-      console.log('👆 Clicking invite link...');
-      inviteLink.click();
-      console.log('✅ Invite link clicked successfully');
+      // Click the Connect button
+      console.log('👆 Clicking Connect button...');
+      connectBtn.click();
+      console.log('✅ Connect button clicked successfully');
       
       // STEP 2: Wait for modal to appear with proper element detection
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
@@ -775,10 +783,16 @@
 
         console.log(`\n👤 [${totalProcessed}] Processing: ${person.first_name} (${person.full_name})`);
 
-        // Scroll to invite link
-        const linkElement = document.querySelector(person.link_selector);
-        if (linkElement) {
-          linkElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        // Scroll to Connect button
+        const buttonElement = document.evaluate(
+          person.button_xpath,
+          document,
+          null,
+          XPathResult.FIRST_ORDERED_NODE_TYPE,
+          null
+        ).singleNodeValue;
+        if (buttonElement) {
+          buttonElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
           await sleep(800);
         }
 
@@ -786,7 +800,7 @@
         const personalizedNote = addNote ? generatePersonalizedNote(noteTemplate, person.first_name) : "";
 
         // Send the connection request
-        const success = await clickConnectButton(person.link_selector, personalizedNote, addNote);
+        const success = await clickConnectButton(person.button_xpath, personalizedNote, addNote);
 
         if (success) {
           connectionState.sent++;
@@ -855,32 +869,31 @@
   }
 
   /**
-   * Scan current page for people with Invite links (new LinkedIn DOM)
+   * Scan current page for people with Connect buttons (new LinkedIn DOM)
    * @param {number} limit - Max people to find on this page
-   * @returns {Array} Array of {first_name, full_name, aria_label, link_selector, profile_url, vanity_name}
+   * @returns {Array} Array of {first_name, full_name, aria_label, button_xpath, profile_url}
    */
   function scanPageForConnections(limit = 10) {
     const peopleToConnect = [];
     
-    // Find all Invite anchor links with /preload/search-custom-invite/ on current page
-    const inviteLinks = Array.from(document.querySelectorAll('a[href*="/preload/search-custom-invite/"]'))
-      .filter(link => {
-        const ariaLabel = link.getAttribute('aria-label') || '';
-        return ariaLabel.includes('Invite') && ariaLabel.includes('to connect');
-      })
-      .slice(0, limit);  // Limit per page
+    // Find all Connect buttons with aria-label containing "to connect" pattern
+    // Example: <button aria-label="Invite Vishal Jindal to connect" ...>
+    const connectButtonsXPath = "//button[contains(@aria-label, 'to connect') and .//span[text()='Connect']]";
+    const result = document.evaluate(
+      connectButtonsXPath,
+      document,
+      null,
+      XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
+      null
+    );
 
-    console.log(`🔍 Found ${inviteLinks.length} Invite links on current page`);
+    console.log(`🔍 Found ${result.snapshotLength} Connect buttons on current page`);
 
-    for (const link of inviteLinks) {
-      const ariaLabel = link.getAttribute('aria-label');
-      const inviteUrl = link.getAttribute('href');
+    for (let i = 0; i < Math.min(result.snapshotLength, limit); i++) {
+      const button = result.snapshotItem(i);
+      const ariaLabel = button.getAttribute('aria-label') || '';
       
-      // Extract vanity name from URL: /preload/search-custom-invite/?vanityName=neha-bisht-5080b1306
-      const vanityMatch = inviteUrl.match(/vanityName=([^&]+)/);
-      const vanityName = vanityMatch ? vanityMatch[1] : '';
-      
-      // Extract full name from "Invite Neha Bisht to connect"
+      // Extract full name from aria-label: "Invite Vishal Jindal to connect"
       const nameMatch = ariaLabel.match(/Invite\s+(.+?)\s+to connect/);
       const fullName = nameMatch ? nameMatch[1].trim() : '';
       
@@ -891,12 +904,14 @@
       
       if (!firstName) continue;
 
+      // Build unique XPath for this specific button using its aria-label
+      const buttonXPath = `//button[@aria-label="${ariaLabel}"]`;
+
       // Try to find the associated profile link
-      // Look for nearby <a> tag with href="https://www.linkedin.com/in/USERNAME/"
       let profileUrl = '';
       try {
         // Search in parent container for profile link
-        const container = link.closest('li') || link.closest('div[class*="search-result"]');
+        const container = button.closest('li') || button.closest('div[class*="search-result"]');
         if (container) {
           const profileLink = container.querySelector('a[href*="/in/"][data-view-name="search-result-lockup-title"]')
             || container.querySelector('a[href*="/in/"]:not([href*="preload"])');
@@ -908,19 +923,15 @@
         console.warn('Could not find profile link:', e);
       }
 
-      const linkSelector = `a[href*="vanityName=${vanityName}"][aria-label="${ariaLabel}"]`;
-
       peopleToConnect.push({
         first_name: firstName,
         full_name: fullName,
         aria_label: ariaLabel,
-        link_selector: linkSelector,
-        invite_url: inviteUrl,
-        vanity_name: vanityName,
+        button_xpath: buttonXPath,
         profile_url: profileUrl
       });
 
-      console.log(`  ✓ ${firstName} (${fullName}): ${vanityName}`);
+      console.log(`  ✓ ${firstName} (${fullName})`);
     }
 
     return peopleToConnect;
@@ -961,18 +972,31 @@
       const person = people[i];
       connectionState.currentIndex = i;
 
-      // Check if invite link still exists on page
-      const linkExists = document.querySelector(person.link_selector);
+      // Check if Connect button still exists on page
+      const buttonExists = document.evaluate(
+        person.button_xpath,
+        document,
+        null,
+        XPathResult.FIRST_ORDERED_NODE_TYPE,
+        null
+      ).singleNodeValue;
       
-      if (!linkExists) {
-        console.warn(`⚠️ Invite link not found for ${person.first_name}, scrolling...`);
+      if (!buttonExists) {
+        console.warn(`⚠️ Connect button not found for ${person.first_name}, scrolling...`);
         window.scrollBy({ top: 400, behavior: 'smooth' });
         await sleep(2000);
         
         // Check again after scroll
-        if (!document.querySelector(person.link_selector)) {
+        const retryButton = document.evaluate(
+          person.button_xpath,
+          document,
+          null,
+          XPathResult.FIRST_ORDERED_NODE_TYPE,
+          null
+        ).singleNodeValue;
+        if (!retryButton) {
           connectionState.failed++;
-          console.warn(`⚠️ Invite link still not found for ${person.first_name}`);
+          console.warn(`⚠️ Connect button still not found for ${person.first_name}`);
           continue;
         }
       }
@@ -985,8 +1009,8 @@
         console.log(`   Note: ${personalizedNote}`);
       }
 
-      // Send the connection request using the stored link selector
-      const success = await clickConnectButton(person.link_selector, personalizedNote, addNote);
+      // Send the connection request using the stored button XPath
+      const success = await clickConnectButton(person.button_xpath, personalizedNote, addNote);
 
       if (success) {
         connectionState.sent++;
