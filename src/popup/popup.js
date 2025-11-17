@@ -255,5 +255,5 @@ chrome.tabs.query({active:true,currentWindow:true}, tabs => {
     else if(!/\/search\/results\/people\//.test(u)) setStatus('Navigate to LinkedIn People Search results','info');
     else setStatus('Ready to scrape people','info');
   }
-  setScrapingState(false);
+  // Removed undefined setScrapingState(false) call to prevent ReferenceError
 });

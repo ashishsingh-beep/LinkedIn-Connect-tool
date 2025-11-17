@@ -23,6 +23,13 @@
     "Mr.", "Mrs.", "Ms.", "Miss", "Mx.", "Sir", "Dame", "Lady", "Lord"
   ];
 
+  // Exact XPaths for invite modal controls
+  const modalXpaths = {
+    addNoteButton: "//button[@aria-label='Add a note']",
+    messageTextarea: "//textarea[@id='custom-message']",
+    sendButton: "//button[@aria-label='Send invitation']"
+  };
+
   /**
    * Remove any professional title or prefix from a name string
    * @param {string} name - Raw LinkedIn name (e.g. "Dr. Altaf Khan", "Eng. Alex Johnson")
@@ -66,6 +73,45 @@
 
   // Utilities
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+  
+  /**
+   * Wait for an element to appear in the DOM
+   * @param {string} selector - CSS selector to wait for
+   * @param {number} timeout - Maximum wait time in milliseconds
+   * @param {number} interval - Check interval in milliseconds
+   * @returns {Promise<Element|null>} The element if found, null if timeout
+   */
+  async function waitForElement(selector, timeout = 5000, interval = 100) {
+    const startTime = Date.now();
+    while (Date.now() - startTime < timeout) {
+      const element = document.querySelector(selector);
+      if (element) {
+        return element;
+      }
+      await sleep(interval);
+    }
+    return null;
+  }
+  
+  /**
+   * Wait for the first node matching an XPath to appear
+   * @param {string} xpath - XPath selector to evaluate
+   * @param {number} timeout - Maximum wait time in milliseconds
+   * @param {number} interval - Polling interval in milliseconds
+   * @returns {Promise<Element|null>} The matched element or null on timeout
+   */
+  async function waitForXPath(xpath, timeout = 5000, interval = 100) {
+    const startTime = Date.now();
+    while (Date.now() - startTime < timeout) {
+      const node = document
+        .evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null)
+        .singleNodeValue;
+      if (node) return node;
+      await sleep(interval);
+    }
+    return null;
+  }
+  
   function hashString(str) { let h = 0, i = 0; while (i < str.length) { h = (h << 5) - h + str.charCodeAt(i++) | 0; } return 'p_' + (h >>> 0).toString(16); }
   function getText(xpath, context) {
     const res = document.evaluate(xpath, context, null, XPathResult.STRING_TYPE, null);
@@ -146,6 +192,18 @@
     return '';
   }
 
+  // ===== MESSAGE SANITIZATION =====
+  function sanitizeNote(text, maxLen = 280) {
+    if (!text) return '';
+    // Strip any HTML tags
+    const noHtml = String(text).replace(/<[^>]*>/g, '');
+    // Normalize whitespace
+    const normalized = noHtml.replace(/\s+/g, ' ').trim();
+    // Clamp length
+    if (normalized.length > maxLen) return normalized.slice(0, maxLen);
+    return normalized;
+  }
+
   function globalFieldDiagnostics() {
     const diag = {};
     const nameXp = xpaths.name[0].startsWith('.//') ? xpaths.name[0].replace('.//', '//') : xpaths.name[0];
@@ -154,6 +212,7 @@
     diag.connectButtonsWithAria = countXPath("//button[contains(@aria-label, 'Connect with')]");
     return diag;
   }
+
 
   async function waitForPeopleDom(timeoutMs = 8000) {
     const start = Date.now();
@@ -167,7 +226,7 @@
 
   /**
    * Extract minimal connection data from a person container
-   * Returns: { first_name, aria_label, btn_selector }
+   * Returns: { first_name, aria_label, link_selector }
    */
   function extractPerson(node) {
     // Get full name and extract first name
@@ -179,34 +238,36 @@
       return null;
     }
     
-    // Find Connect button within this container
-    const connectBtn = node.querySelector('button[aria-label*="Connect with"]')
-      || Array.from(node.querySelectorAll('button')).find(btn => 
-        btn.querySelector('span') && btn.querySelector('span').textContent.trim() === 'Connect'
-      );
+    // Find Invite link within this container (new LinkedIn DOM)
+    const inviteLink = node.querySelector('a[href*="/preload/search-custom-invite/"]');
     
-    if (!connectBtn) {
-      if (DEBUG_VERBOSE) console.warn(`⚠️ No Connect button found for ${firstName} (may be already connected or pending)`);
+    if (!inviteLink) {
+      if (DEBUG_VERBOSE) console.warn(`⚠️ No Invite link found for ${firstName} (may be already connected or pending)`);
       return null;
     }
     
-    console.log(`✅ Found Connect button for ${firstName}`);
+    console.log(`✅ Found Invite link for ${firstName}`);
     
-    const ariaLabel = connectBtn.getAttribute('aria-label') || `Connect with ${firstName}`;
-    const btnSelector = `button[aria-label="${ariaLabel}"]`;
+    const ariaLabel = inviteLink.getAttribute('aria-label') || `Invite ${firstName} to connect`;
+    const inviteUrl = inviteLink.getAttribute('href') || '';
+    const vanityMatch = inviteUrl.match(/vanityName=([^&]+)/);
+    const vanityName = vanityMatch ? vanityMatch[1] : '';
+    const linkSelector = `a[href*="vanityName=${vanityName}"][aria-label="${ariaLabel}"]`;
     
     const internalId = hashString(`${firstName}_${ariaLabel}`);
     const record = { 
       internalId, 
       first_name: firstName, 
       aria_label: ariaLabel, 
-      btn_selector: btnSelector 
+      link_selector: linkSelector,
+      invite_url: inviteUrl,
+      vanity_name: vanityName
     };
     
     // Send real-time data
     chrome.runtime.sendMessage({ 
       action: 'real_time_person_data', 
-      data: { first_name: firstName, aria_label: ariaLabel, btn_selector: btnSelector } 
+      data: { first_name: firstName, aria_label: ariaLabel, link_selector: linkSelector } 
     }, () => { });
     
     return record;
@@ -351,92 +412,302 @@
    */
   function generatePersonalizedNote(template, firstName) {
     if (!template) return "";
-    return template.replace(/{first_name}/g, firstName || "there");
+    const msg = template.replace(/{first_name}/g, firstName || "there");
+    return sanitizeNote(msg);
   }
 
   /**
-   * Click Connect/Invite button and send request directly
-   * @param {string} btnSelector - CSS selector for the button
-   * @param {string} note - Personalized note to add
+   * Click Invite link and handle modal dialog
+   * @param {string} linkSelector - CSS selector for the invite anchor link
+   * @param {string} note - Personalized note to add (with {first_name} already replaced)
    * @param {boolean} addNote - Whether to add a note
    * @returns {Promise<boolean>} Success status
    */
-  async function clickConnectButton(btnSelector, note, addNote) {
+  async function clickConnectButton(linkSelector, note, addNote) {
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('🎯 Starting connection request process');
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    
     try {
-      // Find and click the button using the stored selector
-      const button = document.querySelector(btnSelector);
+      // STEP 1: Find and click the invite link
+      console.log('📍 STEP 1: Locating invite link...');
+      console.log('   Selector:', linkSelector);
       
-      if (!button) {
-        console.error(`❌ Button not found: ${btnSelector}`);
+      const inviteLink = document.querySelector(linkSelector);
+      
+      if (!inviteLink) {
+        console.error('❌ FAILED: Invite link not found');
+        console.error('   Selector:', linkSelector);
         return false;
       }
       
-      // Scroll button into view
-      button.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      await sleep(300);
+      console.log('✅ Invite link found');
+      console.log('   href:', inviteLink.getAttribute('href'));
+      console.log('   aria-label:', inviteLink.getAttribute('aria-label'));
       
-      button.click();
-      console.log('✅ Clicked button:', btnSelector);
+      // Scroll link into view with delay
+      console.log('📜 Scrolling link into view...');
+      inviteLink.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      await sleep(800); // Increased delay for smooth scrolling
       
-      // Wait for modal to appear
-      await sleep(2000);
+      // Click the invite link
+      console.log('👆 Clicking invite link...');
+      inviteLink.click();
+      console.log('✅ Invite link clicked successfully');
       
+      // STEP 2: Wait for modal to appear with proper element detection
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.log('📍 STEP 2: Waiting for modal to appear...');
+      
+      // Wait for modal container to appear
+      const modalSelectors = [
+        'div[role="dialog"]',
+        'div[data-test-modal]',
+        'div.artdeco-modal',
+        'div.send-invite'
+      ];
+      
+      let modalFound = false;
+      for (const selector of modalSelectors) {
+        const modal = await waitForElement(selector, 3000);
+        if (modal) {
+          console.log('✅ Modal found:', selector);
+          modalFound = true;
+          break;
+        }
+      }
+      
+      if (!modalFound) {
+        console.warn('⚠️ WARNING: Modal not detected (proceeding anyway)');
+      }
+      
+      await sleep(1500); // Additional delay for modal content to load
+      console.log('✅ Modal should be fully loaded now');
+      
+      // STEP 3: Add personalized note (if enabled)
       if (addNote && note) {
-        // Try to find "Add a note" button
-        const addNoteBtn = document.querySelector('button[aria-label*="note"]') 
-          || Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Add a note'));
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log('📍 STEP 3: Adding personalized note...');
+        console.log('   Note enabled: true');
+        console.log('   Note content:', note);
+        
+        // Wait and find "Add a note" button with exact LinkedIn selectors
+        console.log('🔍 Looking for "Add a note" button...');
+        await sleep(500); // Small delay before searching
+        
+        // Priority: Use exact XPath first, then fallback to CSS queries
+        const addNoteBtn = await waitForXPath(modalXpaths.addNoteButton, 8000)
+          || await waitForXPath("//button[.//span[normalize-space()='Add a note']]", 3000)
+          || await waitForXPath("//span[normalize-space()='Add a note']/parent::button", 3000)
+          || await waitForXPath("//button[descendant::text() = 'Add a note']", 3000)
+          || document.querySelector("button[aria-label='Add a note'].artdeco-button--secondary")
+          || document.querySelector("button[aria-label='Add a note']")
+          || document.querySelector('button.artdeco-button--secondary .artdeco-button__text')?.closest('button')
+          || Array.from(document.querySelectorAll('button.artdeco-button')).find(b => {
+              const spanText = b.querySelector('.artdeco-button__text');
+              return spanText && spanText.textContent.trim() === 'Add a note';
+            })
+          || Array.from(document.querySelectorAll('button')).find(b => 
+              b.textContent.trim() === 'Add a note' ||
+              b.getAttribute('aria-label') === 'Add a note'
+            );
         
         if (addNoteBtn) {
-          addNoteBtn.click();
-          await sleep(1000);
+          console.log('✅ "Add a note" button found');
+          console.log('   Button classes:', addNoteBtn.className);
+          console.log('   Button text:', addNoteBtn.textContent.trim());
+          console.log('   aria-label:', addNoteBtn.getAttribute('aria-label'));
+          console.log('   Button ID:', addNoteBtn.id || 'N/A');
           
-          // Find the textarea and insert note
-          const textarea = document.querySelector('textarea[name="message"]')
-            || document.querySelector('textarea[aria-label*="note"]')
+          await sleep(300); // Delay before clicking
+          console.log('👆 Clicking "Add a note" button...');
+          addNoteBtn.click();
+          console.log('✅ "Add a note" button clicked');
+          
+          // Wait for textarea to appear with proper detection using XPath first
+          console.log('⏳ Waiting for textarea to appear...');
+          const textarea = await waitForXPath(modalXpaths.messageTextarea, 3000)
+            || await waitForElement('textarea#custom-message.connect-button-send-invite__custom-message', 2500)
+            || await waitForElement('textarea#custom-message', 2500)
+            || await waitForElement('textarea[name="message"]', 2000)
+            || await waitForElement('textarea.ember-text-area', 1500)
             || document.querySelector('textarea');
           
           if (textarea) {
+            console.log('✅ Textarea found');
+            console.log('   ID:', textarea.id || 'N/A');
+            console.log('   Name:', textarea.name || 'N/A');
+            console.log('   Classes:', textarea.className || 'N/A');
+            console.log('   Placeholder:', textarea.placeholder || 'N/A');
+            console.log('   Min length:', textarea.minLength || 'N/A');
+            console.log('   Rows:', textarea.rows || 'N/A');
+            
+            await sleep(400); // Increased delay before filling
+            console.log('✍️ Filling textarea with personalized note...');
+            
+            // Focus and fill textarea
+            textarea.focus();
+            await sleep(150);
+            
+            // Clear any existing content first
+            textarea.value = '';
+            await sleep(50);
+            
+            // Set the personalized note
             textarea.value = note;
+            
+            // Trigger multiple events to ensure LinkedIn detects the change
             textarea.dispatchEvent(new Event('input', { bubbles: true }));
-            console.log('📝 Note added:', note);
+            await sleep(100);
+            textarea.dispatchEvent(new Event('change', { bubbles: true }));
+            await sleep(100);
+            textarea.dispatchEvent(new Event('blur', { bubbles: true }));
+            await sleep(100);
+            
+            // Re-focus to ensure LinkedIn sees the content
+            textarea.focus();
+            
+            console.log('✅ Personalized note added successfully');
+            console.log('   Final note:', textarea.value);
+            console.log('   Character count:', textarea.value.length);
+            console.log('   Meets min length:', textarea.value.length >= (textarea.minLength || 1));
+            
+            await sleep(1000); // Increased delay after filling note
+          } else {
+            console.warn('⚠️ WARNING: Textarea not found after waiting');
+            console.warn('   Note will not be added');
             await sleep(500);
           }
-        }
-      }
-      
-      // Find and click Send button (direct send, no confirmation)
-      const sendBtn = document.querySelector('button[aria-label*="Send"]')
-        || document.querySelector('button[aria-label*="Send invitation"]')
-        || Array.from(document.querySelectorAll('button')).find(b => 
-            b.textContent.trim() === 'Send' || b.textContent.includes('Send')
-          );
-      
-      if (sendBtn && !sendBtn.disabled) {
-        sendBtn.click();
-        console.log('📤 Sent connection request directly');
-        await sleep(1500);
-        return true;
-      } else {
-        console.warn('⚠️ Send button not found or disabled');
-        // Try to close modal
-        const closeBtn = document.querySelector('button[aria-label*="Dismiss"]')
-          || document.querySelector('button[data-test-modal-close-btn]')
-          || document.querySelector('button[data-test-modal-id="send-invite-modal"] svg')?.closest('button');
-        if (closeBtn) {
-          closeBtn.click();
+        } else {
+          console.warn('⚠️ WARNING: "Add a note" button not found');
+          console.warn('   Available buttons:');
+          const allButtons = Array.from(document.querySelectorAll('button')).map(b => ({
+            text: b.textContent.trim().substring(0, 30),
+            ariaLabel: b.getAttribute('aria-label'),
+            classes: b.className.substring(0, 50)
+          }));
+          console.table(allButtons);
+          console.warn('   Proceeding without note');
           await sleep(500);
         }
+      } else {
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log('📍 STEP 3: Skipping note (addNote:', addNote, ')');
+        await sleep(500); // Small delay even when skipping
+      }
+      
+      // STEP 4: Click Send (or "Send without a note") with proper waiting and exact LinkedIn selectors
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.log('📍 STEP 4: Sending invitation...');
+      console.log('🔍 Looking for Send button...');
+      
+      await sleep(600); // Increased delay before searching for Send button
+      
+      // If not adding a note and the choice dialog offers "Send without a note", prefer that
+      if (!addNote) {
+        const sendWithoutNoteBtn = document.querySelector("button[aria-label='Send without a note']")
+          || Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Send without a note');
+        if (sendWithoutNoteBtn && !sendWithoutNoteBtn.disabled) {
+          console.log('✅ Found "Send without a note" button');
+          await sleep(400);
+          console.log('👆 Clicking "Send without a note"...');
+          sendWithoutNoteBtn.click();
+          console.log('✅ Invitation sent without a note');
+          await sleep(2000);
+          return true;
+        }
+      }
+
+      // Wait for Send button to be available using XPath first
+      const sendBtn = await waitForXPath(modalXpaths.sendButton, 2500)
+        || await waitForElement("button[aria-label='Send invitation'].artdeco-button--primary", 2000)
+        || await waitForElement("button[aria-label='Send invitation']", 2000)
+        || document.querySelector('button.artdeco-button--primary[aria-label*="Send"]')
+        || Array.from(document.querySelectorAll('button.artdeco-button--primary')).find(b => {
+            const spanText = b.querySelector('.artdeco-button__text');
+            return spanText && spanText.textContent.trim() === 'Send';
+          })
+        || Array.from(document.querySelectorAll('button')).find(b => 
+            b.textContent.trim() === 'Send' && 
+            b.getAttribute('aria-label')?.includes('Send')
+          );
+      
+      if (sendBtn) {
+        console.log('✅ Send button found');
+        console.log('   Button classes:', sendBtn.className);
+        console.log('   Button text:', sendBtn.textContent.trim());
+        console.log('   aria-label:', sendBtn.getAttribute('aria-label') || 'N/A');
+        console.log('   Button ID:', sendBtn.id || 'N/A');
+        console.log('   Disabled:', sendBtn.disabled);
+        
+        if (!sendBtn.disabled) {
+          await sleep(600); // Increased delay before clicking Send
+          console.log('👆 Clicking Send button...');
+          sendBtn.click();
+          console.log('✅ Send button clicked successfully');
+          console.log('📤 CONNECTION REQUEST SENT!');
+          console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+          
+          await sleep(2500); // Increased delay after sending to ensure request processes
+          return true;
+        } else {
+          console.error('❌ FAILED: Send button is disabled');
+          console.error('   This may indicate missing required fields or invalid note');
+          console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+          await closeModal();
+          return false;
+        }
+      } else {
+        console.error('❌ FAILED: Send button not found');
+        console.error('   Searching for all buttons in modal...');
+        const allButtons = Array.from(document.querySelectorAll('button')).map(b => ({
+          text: b.textContent.trim(),
+          ariaLabel: b.getAttribute('aria-label'),
+          classes: b.className.substring(0, 50),
+          disabled: b.disabled
+        }));
+        console.table(allButtons);
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        await closeModal();
         return false;
       }
     } catch (error) {
-      console.error('❌ Error in clickConnectButton:', error);
-      // Try to close any open modal
-      try {
-        const closeBtn = document.querySelector('button[aria-label*="Dismiss"]')
-          || document.querySelector('button[data-test-modal-close-btn]');
-        if (closeBtn) closeBtn.click();
-      } catch (_) {}
+      console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.error('❌ CRITICAL ERROR in clickConnectButton');
+      console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.error('Error name:', error.name);
+      console.error('Error message:', error.message);
+      console.error('Stack trace:', error.stack);
+      console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      
+      await closeModal();
       return false;
+    }
+  }
+
+  /**
+   * Helper function to close the modal
+   */
+  async function closeModal() {
+    try {
+      console.log('🚪 Attempting to close modal...');
+      const closeBtn = document.querySelector('button[aria-label*="Dismiss"]')
+        || document.querySelector('button[data-test-modal-close-btn]')
+        || document.querySelector('button[data-testid="modal-close-button"]')
+        || Array.from(document.querySelectorAll('button')).find(b => 
+            b.getAttribute('aria-label')?.includes('Dismiss') ||
+            b.getAttribute('aria-label')?.includes('Close')
+          );
+      
+      if (closeBtn) {
+        closeBtn.click();
+        console.log('✅ Modal closed');
+        await sleep(500);
+      } else {
+        console.warn('⚠️ Close button not found, modal may still be open');
+      }
+    } catch (e) {
+      console.warn('⚠️ Error closing modal:', e.message);
     }
   }
 
@@ -502,12 +773,12 @@
         const person = peopleOnThisPage[i];
         totalProcessed++;
 
-        console.log(`\n👤 [${totalProcessed}] Processing: ${person.first_name}`);
+        console.log(`\n👤 [${totalProcessed}] Processing: ${person.first_name} (${person.full_name})`);
 
-        // Scroll to button
-        const buttonElement = document.querySelector(person.btn_selector);
-        if (buttonElement) {
-          buttonElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        // Scroll to invite link
+        const linkElement = document.querySelector(person.link_selector);
+        if (linkElement) {
+          linkElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
           await sleep(800);
         }
 
@@ -515,7 +786,7 @@
         const personalizedNote = addNote ? generatePersonalizedNote(noteTemplate, person.first_name) : "";
 
         // Send the connection request
-        const success = await clickConnectButton(person.btn_selector, personalizedNote, addNote);
+        const success = await clickConnectButton(person.link_selector, personalizedNote, addNote);
 
         if (success) {
           connectionState.sent++;
@@ -584,41 +855,72 @@
   }
 
   /**
-   * Scan current page for people with Invite buttons
+   * Scan current page for people with Invite links (new LinkedIn DOM)
    * @param {number} limit - Max people to find on this page
-   * @returns {Array} Array of {first_name, aria_label, btn_selector}
+   * @returns {Array} Array of {first_name, full_name, aria_label, link_selector, profile_url, vanity_name}
    */
   function scanPageForConnections(limit = 10) {
     const peopleToConnect = [];
     
-    // Find all Invite buttons on current page
-    const inviteButtons = Array.from(document.querySelectorAll('button'))
-      .filter(btn => {
-        const ariaLabel = btn.getAttribute('aria-label') || '';
+    // Find all Invite anchor links with /preload/search-custom-invite/ on current page
+    const inviteLinks = Array.from(document.querySelectorAll('a[href*="/preload/search-custom-invite/"]'))
+      .filter(link => {
+        const ariaLabel = link.getAttribute('aria-label') || '';
         return ariaLabel.includes('Invite') && ariaLabel.includes('to connect');
       })
       .slice(0, limit);  // Limit per page
 
-    console.log(`🔍 Found ${inviteButtons.length} Invite buttons on current page`);
+    console.log(`🔍 Found ${inviteLinks.length} Invite links on current page`);
 
-    for (const button of inviteButtons) {
-      const ariaLabel = button.getAttribute('aria-label');
+    for (const link of inviteLinks) {
+      const ariaLabel = link.getAttribute('aria-label');
+      const inviteUrl = link.getAttribute('href');
       
-      // Extract first name from "Invite Nakul Sakhuja to connect"
-      const match = ariaLabel.match(/Invite\s+(\S+)/);
-      const firstName = match ? match[1] : '';
+      // Extract vanity name from URL: /preload/search-custom-invite/?vanityName=neha-bisht-5080b1306
+      const vanityMatch = inviteUrl.match(/vanityName=([^&]+)/);
+      const vanityName = vanityMatch ? vanityMatch[1] : '';
+      
+      // Extract full name from "Invite Neha Bisht to connect"
+      const nameMatch = ariaLabel.match(/Invite\s+(.+?)\s+to connect/);
+      const fullName = nameMatch ? nameMatch[1].trim() : '';
+      
+      if (!fullName) continue;
+
+      // Extract first name using the cleanAndExtractFirstName function
+      const firstName = cleanAndExtractFirstName(fullName);
       
       if (!firstName) continue;
 
-      const btnSelector = `button[aria-label="${ariaLabel}"]`;
+      // Try to find the associated profile link
+      // Look for nearby <a> tag with href="https://www.linkedin.com/in/USERNAME/"
+      let profileUrl = '';
+      try {
+        // Search in parent container for profile link
+        const container = link.closest('li') || link.closest('div[class*="search-result"]');
+        if (container) {
+          const profileLink = container.querySelector('a[href*="/in/"][data-view-name="search-result-lockup-title"]')
+            || container.querySelector('a[href*="/in/"]:not([href*="preload"])');
+          if (profileLink) {
+            profileUrl = profileLink.getAttribute('href');
+          }
+        }
+      } catch (e) {
+        console.warn('Could not find profile link:', e);
+      }
+
+      const linkSelector = `a[href*="vanityName=${vanityName}"][aria-label="${ariaLabel}"]`;
 
       peopleToConnect.push({
         first_name: firstName,
+        full_name: fullName,
         aria_label: ariaLabel,
-        btn_selector: btnSelector
+        link_selector: linkSelector,
+        invite_url: inviteUrl,
+        vanity_name: vanityName,
+        profile_url: profileUrl
       });
 
-      console.log(`  ✓ ${firstName}: ${ariaLabel}`);
+      console.log(`  ✓ ${firstName} (${fullName}): ${vanityName}`);
     }
 
     return peopleToConnect;
@@ -659,18 +961,18 @@
       const person = people[i];
       connectionState.currentIndex = i;
 
-      // Check if button still exists on page
-      const buttonExists = document.querySelector(person.btn_selector);
+      // Check if invite link still exists on page
+      const linkExists = document.querySelector(person.link_selector);
       
-      if (!buttonExists) {
-        console.warn(`⚠️ Button not found for ${person.first_name}, scrolling...`);
+      if (!linkExists) {
+        console.warn(`⚠️ Invite link not found for ${person.first_name}, scrolling...`);
         window.scrollBy({ top: 400, behavior: 'smooth' });
         await sleep(2000);
         
         // Check again after scroll
-        if (!document.querySelector(person.btn_selector)) {
+        if (!document.querySelector(person.link_selector)) {
           connectionState.failed++;
-          console.warn(`⚠️ Button still not found for ${person.first_name}`);
+          console.warn(`⚠️ Invite link still not found for ${person.first_name}`);
           continue;
         }
       }
@@ -683,8 +985,8 @@
         console.log(`   Note: ${personalizedNote}`);
       }
 
-      // Send the connection request using the stored button selector
-      const success = await clickConnectButton(person.btn_selector, personalizedNote, addNote);
+      // Send the connection request using the stored link selector
+      const success = await clickConnectButton(person.link_selector, personalizedNote, addNote);
 
       if (success) {
         connectionState.sent++;
